@@ -89,6 +89,8 @@ const EXPENSE_CATS = [
   { id:'homeoffice',     label:'Home Office',              note:'Council tax, utilities, rent — business %',               pct:true,  defaultPct:20 },
   { id:'car',            label:'Car & Mileage',            note:'45p/mile first 10k, 25p after — track in Deductions',     pct:false },
   { id:'travel',         label:'Travel (Public Transport)', note:'Train, bus, taxi for business journeys',                 pct:false },
+  { id:'subsistence',    label:'Subsistence (Travel)',     note:'Food/drink during business journeys (accountant approved)', pct:false },
+  { id:'accommodation',  label:'Accommodation',            note:'Hotels for events, courses, away business travel',         pct:false },
   { id:'parking',        label:'Parking',                  note:'Business parking — not at regular workplace',             pct:false },
   { id:'profees',        label:'Professional Fees',        note:'Accountant, bookkeeper, legal advice',                    pct:false },
   { id:'insurance',      label:'Business Insurance',       note:'PI insurance, public liability cover',                    pct:false },
@@ -132,7 +134,7 @@ const parseCSV = (text, bank) => {
     else if (bank === 'rbs') { date=get(row,['date','transaction date']); desc=get(row,['description','merchant name','reference']); const cr=toAmt(get(row,['credit amount','credit'])),db=toAmt(get(row,['debit amount','debit'])); amount=cr>0?cr:db>0?-db:toAmt(get(row,['amount'])); }
     else if (bank === 'amex') { date=get(row,['date','transaction date']); desc=get(row,['description','merchant']); amount=-toAmt(get(row,['amount'])); }
     if (!desc || amount === 0) return null;
-    return { id:`${bank}-${idx}-${Date.now()}-${Math.random()}`, date, description:desc, amount, bank, status:'pending', subcat:null, claimPct:100, claimable:0, note:'' };
+    return { id:`${bank}-${idx}-${Date.now()}-${Math.random()}`, date, description:desc, amount, bank, status:'pending', subcat:null, claimPct:100, claimable:0, note:'', accountantOk:false, receiptOk:false };
   }).filter(Boolean);
 };
 
@@ -231,7 +233,7 @@ const HomeOfficeCalc = ({ homeData, setHomeData }) => {
 };
 
 /* ─── TRANSACTION CARD ───────────────────────────────────────────────── */
-const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onDelete }) => {
+const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
   const [open, setOpen] = useState(false);
   const [showNote, setShowNote] = useState(!!t.note);
   const cat = EXPENSE_CATS.find(c => c.id === t.subcat);
@@ -307,11 +309,11 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onDelete }) => {
           {/* Note for HMRC */}
           {!showNote ? (
             <button onClick={() => setShowNote(true)}
-              style={{ background: 'transparent', border: `1px dashed ${G.glassBorderHi}`, borderRadius: 10, color: G.textDim, padding: '9px 14px', fontSize: 12, cursor: 'pointer', fontFamily: FONT, width: '100%' }}>
+              style={{ background: 'transparent', border: `1px dashed ${G.glassBorderHi}`, borderRadius: 10, color: G.textDim, padding: '9px 14px', fontSize: 12, cursor: 'pointer', fontFamily: FONT, width: '100%', marginBottom: 12 }}>
               + Add note for HMRC justification
             </button>
           ) : (
-            <div>
+            <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 6 }}>HMRC NOTE</div>
               <textarea value={t.note} onChange={e => onNote(t.id, e.target.value)} rows={2}
                 placeholder="e.g. Camera used 100% for client demo videos and reels"
@@ -319,6 +321,29 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onDelete }) => {
               <div style={{ fontSize: 11, color: G.muted, marginTop: 6 }}>HMRC can request justification up to 5 years after filing. A short note now saves stress later.</div>
             </div>
           )}
+
+          {/* Compliance toggles */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+            <button onClick={() => onFlag(t.id, 'accountantOk', !t.accountantOk)}
+              style={{
+                background: t.accountantOk ? `rgba(${hexToRgb(G.green)},0.18)` : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${t.accountantOk ? G.green : G.glassBorder}`,
+                color: t.accountantOk ? G.green : G.textDim,
+                borderRadius: 999, padding: '7px 14px', fontSize: 12, fontWeight: t.accountantOk ? 700 : 500, cursor: 'pointer', fontFamily: FONT
+              }}>
+              {t.accountantOk ? '✓ Accountant Approved' : '+ Accountant Approved'}
+            </button>
+            <button onClick={() => onFlag(t.id, 'receiptOk', !t.receiptOk)}
+              style={{
+                background: t.receiptOk ? `rgba(${hexToRgb(G.gold)},0.18)` : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${t.receiptOk ? G.gold : G.glassBorder}`,
+                color: t.receiptOk ? G.gold : G.textDim,
+                borderRadius: 999, padding: '7px 14px', fontSize: 12, fontWeight: t.receiptOk ? 700 : 500, cursor: 'pointer', fontFamily: FONT
+              }}>
+              {t.receiptOk ? '✓ Receipt Saved' : '+ Receipt Saved'}
+            </button>
+          </div>
+          <div style={{ fontSize: 10, color: G.muted, marginBottom: 4 }}>MTD rules from April 2026 require digital receipts. Photograph yours and save to Drive.</div>
 
           {cat && <div style={{ fontSize: 11, color: G.muted, marginTop: 10 }}>{cat.note}</div>}
         </div>
@@ -342,6 +367,8 @@ export default function RDHTaxDashboard() {
   const [search, setSearch]               = useState('');
   const [statusFilter, setStatusFilter]   = useState('all');
   const [savedAt, setSavedAt]             = useState(saved.savedAt || null);
+  const [payslipModal, setPayslipModal]   = useState(false);
+  const [editingSlip, setEditingSlip]     = useState({ month: '', grossPay: '', netPay: '', incomeTaxPaid: '', niPaid: '' });
 
   // Auto-save to localStorage on any change to persistent fields
   useEffect(() => {
@@ -466,6 +493,10 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
     setTransactions(prev => prev.map(t => t.id === id ? { ...t, note } : t));
   }, []);
 
+  const onFlag = useCallback((id, field, value) => {
+    setTransactions(prev => prev.map(t => t.id === id ? { ...t, [field]: value } : t));
+  }, []);
+
   const mileageClaimable = miles <= 10000 ? miles * 0.45 : (10000 * 0.45) + ((miles - 10000) * 0.25);
   const homeClaimable = (Object.entries(homeData).filter(([k]) => k !== 'roomPct').reduce((s,[,v]) => s + (v||0), 0)) * (homeData.roomPct / 100);
 
@@ -537,7 +568,7 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input ref={payslipRef} type="file" accept=".pdf,image/*" multiple onChange={handlePayslip} style={{ display: 'none' }} />
+          {/* Payslip file input removed — using manual modal instead */}
           {BANKS.map(b => (
             <div key={b.id}>
               <input ref={bankRefs[b.id]} type="file" accept=".csv" onChange={handleUpload(b.id)} style={{ display: 'none' }} />
@@ -547,12 +578,85 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
               </button>
             </div>
           ))}
-          <button onClick={() => payslipRef.current.click()} disabled={busySlip}
+          <button onClick={() => { setEditingSlip({ month: new Date().toISOString().slice(0,7), grossPay: '', netPay: '', incomeTaxPaid: '', niPaid: '' }); setPayslipModal(true); }}
             style={{ background: payslips.length > 0 ? `rgba(${hexToRgb(G.gold)},0.15)` : G.glass, border: `1px solid ${payslips.length > 0 ? G.gold : G.glassBorder}`, borderRadius: 9, color: payslips.length > 0 ? G.gold : G.textDim, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}>
-            {busySlip ? 'Reading…' : `Payslips${payslips.length > 0 ? ` · ${payslips.length}` : ''}`}
+            + Payslip{payslips.length > 0 ? ` · ${payslips.length}` : ''}
           </button>
         </div>
       </div>
+
+      {/* ── PAYSLIP MODAL ── */}
+      {payslipModal && (
+        <div onClick={() => setPayslipModal(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ ...glass({ padding: 28, maxWidth: 480, width: '100%' }) }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: G.text }}>Add Payslip</div>
+                <div style={{ fontSize: 12, color: G.textDim, marginTop: 4 }}>Enter the figures from your Terumo payslip</div>
+              </div>
+              <button onClick={() => setPayslipModal(false)} style={{ background: 'rgba(255,255,255,0.06)', border: `1px solid ${G.glassBorder}`, borderRadius: 8, color: G.textDim, padding: '6px 12px', fontSize: 14, cursor: 'pointer', fontFamily: FONT }}>×</button>
+            </div>
+
+            {[
+              { key: 'month',         label: 'Pay Month',           type: 'month',  prefix: '' },
+              { key: 'grossPay',      label: 'Gross Pay',           type: 'number', prefix: '£' },
+              { key: 'netPay',        label: 'Net Pay (take-home)', type: 'number', prefix: '£' },
+              { key: 'incomeTaxPaid', label: 'Income Tax Paid',     type: 'number', prefix: '£' },
+              { key: 'niPaid',        label: 'National Insurance',  type: 'number', prefix: '£' },
+            ].map(({ key, label, type, prefix }) => (
+              <div key={key} style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 6, letterSpacing: '0.02em' }}>{label.toUpperCase()}</div>
+                <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(255,255,255,0.05)', border: `1px solid ${G.glassBorder}`, borderRadius: 10, padding: '0 14px' }}>
+                  {prefix && <span style={{ color: G.textDim, fontSize: 14, marginRight: 6 }}>{prefix}</span>}
+                  <input type={type} value={editingSlip[key]} onChange={e => setEditingSlip(s => ({ ...s, [key]: e.target.value }))}
+                    placeholder={type === 'number' ? '0.00' : ''}
+                    style={{ flex: 1, background: 'transparent', border: 'none', color: G.text, padding: '11px 0', fontSize: 14, fontFamily: FONT_NUM, outline: 'none' }} />
+                </div>
+              </div>
+            ))}
+
+            {payslips.length > 0 && (
+              <div style={{ marginTop: 18, padding: '12px 14px', background: 'rgba(255,255,255,0.04)', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 8, letterSpacing: '0.02em' }}>EXISTING PAYSLIPS</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {payslips.map(p => (
+                    <div key={p.month} style={{ display: 'flex', alignItems: 'center', gap: 6, background: `rgba(${hexToRgb(G.gold)},0.12)`, border: `1px solid rgba(${hexToRgb(G.gold)},0.25)`, borderRadius: 999, padding: '4px 10px' }}>
+                      <span style={{ fontSize: 11, color: G.gold }}>{p.label}: {fmt(p.grossPay)}</span>
+                      <button onClick={() => setEditingSlip({ month: p.month, grossPay: p.grossPay, netPay: p.netPay, incomeTaxPaid: p.incomeTaxPaid, niPaid: p.niPaid })}
+                        style={{ background: 'transparent', border: 'none', color: G.gold, fontSize: 11, cursor: 'pointer', fontFamily: FONT, padding: 0 }}>edit</button>
+                      <button onClick={() => setPayslips(prev => prev.filter(x => x.month !== p.month))}
+                        style={{ background: 'transparent', border: 'none', color: G.red, fontSize: 11, cursor: 'pointer', fontFamily: FONT, padding: 0 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
+              <button onClick={() => setPayslipModal(false)}
+                style={{ flex: 1, background: G.glass, border: `1px solid ${G.glassBorderHi}`, borderRadius: 10, color: G.textDim, padding: '12px', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}>
+                Cancel
+              </button>
+              <button onClick={() => {
+                if (!editingSlip.month || !editingSlip.grossPay) { alert('Pay month and gross pay are required'); return; }
+                const slip = {
+                  month: editingSlip.month,
+                  grossPay: parseFloat(editingSlip.grossPay) || 0,
+                  netPay: parseFloat(editingSlip.netPay) || 0,
+                  incomeTaxPaid: parseFloat(editingSlip.incomeTaxPaid) || 0,
+                  niPaid: parseFloat(editingSlip.niPaid) || 0,
+                  label: monthLabel(editingSlip.month),
+                };
+                setPayslips(prev => [...prev.filter(p => p.month !== slip.month), slip].sort((a,b) => a.month.localeCompare(b.month)));
+                setPayslipModal(false);
+              }}
+                style={{ flex: 2, background: `linear-gradient(135deg, ${G.blue}, ${G.purple})`, border: 'none', borderRadius: 10, color: '#fff', padding: '12px', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: FONT, boxShadow: `0 4px 20px ${G.blueGlow}` }}>
+                Save Payslip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── TAB NAV ── */}
       <div style={{ display: 'flex', padding: '14px 24px', gap: 6, justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -680,7 +784,7 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
             {filtered.length > 0 ? (
               <GlassCard style={{ overflow: 'hidden', padding: 0 }}>
                 {filtered.map(t => (
-                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} />
+                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} onFlag={onFlag} />
                 ))}
               </GlassCard>
             ) : (
