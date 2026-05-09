@@ -113,9 +113,50 @@ const monthLabel = k => {
   const [y, m] = k.split('-');
   return `${MONTHS[parseInt(m, 10) - 1]} ${y}`;
 };
+// Smart date parser — handles UK (dd/mm/yyyy), US (mm/dd/yyyy), ISO (yyyy-mm-dd), and text formats
+// Returns YYYY-MM-DD string, or empty if unparseable
+const parseDate = (raw) => {
+  if (!raw) return '';
+  const s = String(raw).trim();
+
+  // ISO format: 2026-04-01 or 2026/04/01
+  const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (iso) return `${iso[1]}-${iso[2].padStart(2,'0')}-${iso[3].padStart(2,'0')}`;
+
+  // dd/mm/yyyy or mm/dd/yyyy or dd-mm-yyyy etc
+  const slash = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/);
+  if (slash) {
+    let [, a, b, y] = slash;
+    a = parseInt(a, 10); b = parseInt(b, 10); y = parseInt(y, 10);
+    if (y < 100) y += 2000;
+    // If first part > 12, must be UK format (day first)
+    // If second part > 12, must be US format (month first)
+    // Default: UK format (most common in UK CSVs)
+    if (a > 12) return `${y}-${String(b).padStart(2,'0')}-${String(a).padStart(2,'0')}`;
+    if (b > 12) return `${y}-${String(a).padStart(2,'0')}-${String(b).padStart(2,'0')}`;
+    // Ambiguous — default UK (day/month/year) since user is in UK
+    return `${y}-${String(b).padStart(2,'0')}-${String(a).padStart(2,'0')}`;
+  }
+
+  // Text format: "1 April 2026", "01 Apr 2026"
+  const text = s.match(/^(\d{1,2})\s+(\w+)\s+(\d{2,4})/);
+  if (text) {
+    const monthMap = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+    const m = monthMap[text[2].slice(0,3).toLowerCase()];
+    if (m) {
+      let y = parseInt(text[3], 10); if (y < 100) y += 2000;
+      return `${y}-${String(m).padStart(2,'0')}-${text[1].padStart(2,'0')}`;
+    }
+  }
+
+  return '';
+};
+
 const toMonthKey = d => {
-  const dt = new Date(d);
-  return isNaN(dt) ? 'Unknown' : `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`;
+  if (!d) return 'Unknown';
+  // d is already YYYY-MM-DD from parseDate
+  const m = String(d).match(/^(\d{4})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}` : 'Unknown';
 };
 
 const parseCSV = (text, bank) => {
@@ -128,12 +169,13 @@ const parseCSV = (text, bank) => {
     for (const ch of line) { if (ch === '"') inQ = !inQ; else if (ch === ',' && !inQ) { vals.push(cur); cur = ''; } else cur += ch; }
     vals.push(cur);
     const row = {}; headers.forEach((h, i) => row[h] = (vals[i] || '').replace(/"/g,'').trim());
-    let date = '', desc = '', amount = 0;
-    if (bank === 'monzo') { date=get(row,['date']); desc=get(row,['name','description','merchant name']); amount=toAmt(get(row,['amount'])); }
-    else if (bank === 'starling') { date=get(row,['date']); desc=get(row,['counter party','reference','description']); amount=toAmt(get(row,['amount (gbp)','amount'])); }
-    else if (bank === 'rbs') { date=get(row,['date','transaction date']); desc=get(row,['description','merchant name','reference']); const cr=toAmt(get(row,['credit amount','credit'])),db=toAmt(get(row,['debit amount','debit'])); amount=cr>0?cr:db>0?-db:toAmt(get(row,['amount'])); }
-    else if (bank === 'amex') { date=get(row,['date','transaction date']); desc=get(row,['description','merchant']); amount=-toAmt(get(row,['amount'])); }
+    let rawDate = '', desc = '', amount = 0;
+    if (bank === 'monzo') { rawDate=get(row,['date']); desc=get(row,['name','description','merchant name']); amount=toAmt(get(row,['amount'])); }
+    else if (bank === 'starling') { rawDate=get(row,['date']); desc=get(row,['counter party','reference','description']); amount=toAmt(get(row,['amount (gbp)','amount'])); }
+    else if (bank === 'rbs') { rawDate=get(row,['date','transaction date']); desc=get(row,['description','merchant name','reference']); const cr=toAmt(get(row,['credit amount','credit'])),db=toAmt(get(row,['debit amount','debit'])); amount=cr>0?cr:db>0?-db:toAmt(get(row,['amount'])); }
+    else if (bank === 'amex') { rawDate=get(row,['date','transaction date']); desc=get(row,['description','merchant']); amount=-toAmt(get(row,['amount'])); }
     if (!desc || amount === 0) return null;
+    const date = parseDate(rawDate) || rawDate; // fall back to raw if parse fails
     return { id:`${bank}-${idx}-${Date.now()}-${Math.random()}`, date, description:desc, amount, bank, status:'pending', subcat:null, claimPct:100, claimable:0, note:'', accountantOk:false, receiptOk:false };
   }).filter(Boolean);
 };
@@ -233,7 +275,7 @@ const HomeOfficeCalc = ({ homeData, setHomeData }) => {
 };
 
 /* ─── TRANSACTION CARD ───────────────────────────────────────────────── */
-const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
+const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, driveUrl, onDelete }) => {
   const [open, setOpen] = useState(false);
   const [showNote, setShowNote] = useState(!!t.note);
   const cat = EXPENSE_CATS.find(c => c.id === t.subcat);
@@ -259,7 +301,7 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
         <div style={{ fontSize: 16, fontWeight: 700, color: t.amount >= 0 ? G.green : G.red, fontFamily: FONT_NUM, flexShrink: 0, minWidth: 90, textAlign: 'right' }}>{fmt(t.amount)}</div>
 
         {/* Status buttons */}
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
           {[
             { key: 'income',   label: 'Income',   color: G.green  },
             { key: 'expense',  label: 'Expense',  color: G.blue   },
@@ -270,6 +312,26 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
               {label}
             </button>
           ))}
+
+          {/* Inline % input — only visible when expense */}
+          {t.status === 'expense' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: `rgba(${hexToRgb(G.blue)},0.1)`, border: `1px solid rgba(${hexToRgb(G.blue)},0.3)`, borderRadius: 999, padding: '4px 4px 4px 12px' }}>
+              <input
+                type="number" min="0" max="100" step="1"
+                value={t.claimPct}
+                onChange={e => {
+                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                  onPct(t.id, v);
+                }}
+                style={{ width: 38, background: 'transparent', border: 'none', color: G.blue, fontSize: 13, fontWeight: 700, fontFamily: FONT_NUM, outline: 'none', textAlign: 'right', padding: 0 }}
+              />
+              <span style={{ fontSize: 12, color: G.blue, fontWeight: 600, marginRight: 6 }}>%</span>
+              <span style={{ fontSize: 11, color: G.green, fontFamily: FONT_NUM, fontWeight: 600, padding: '4px 10px', background: `rgba(${hexToRgb(G.green)},0.12)`, borderRadius: 999 }}>
+                {fmt(Math.abs(t.amount) * t.claimPct / 100)}
+              </span>
+            </div>
+          )}
+
           {t.status === 'expense' && (
             <button onClick={() => setOpen(!open)}
               style={{ background: 'rgba(255,255,255,0.06)', border: `1px solid ${G.glassBorder}`, borderRadius: 999, width: 32, height: 32, color: G.textDim, fontSize: 14, cursor: 'pointer', fontFamily: FONT, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -297,12 +359,15 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
             ))}
           </div>
 
-          {/* Percentage slider — always visible for expenses */}
+          {/* Percentage — typeable + slider */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, padding: '12px 16px', background: 'rgba(255,255,255,0.04)', borderRadius: 10 }}>
             <span style={{ fontSize: 12, color: G.textDim, minWidth: 95 }}>Business use</span>
-            <input type="range" min="0" max="100" step="5" value={t.claimPct} onChange={e => onPct(t.id, Number(e.target.value))}
+            <input type="range" min="0" max="100" step="1" value={t.claimPct} onChange={e => onPct(t.id, Number(e.target.value))}
               style={{ flex: 1, accentColor: G.blue }} />
-            <span style={{ fontSize: 16, fontWeight: 700, color: G.blue, fontFamily: FONT_NUM, minWidth: 46, textAlign: 'right' }}>{t.claimPct}%</span>
+            <input type="number" min="0" max="100" step="1" value={t.claimPct}
+              onChange={e => onPct(t.id, Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+              style={{ width: 56, background: 'rgba(255,255,255,0.06)', border: `1px solid ${G.glassBorderHi}`, borderRadius: 8, color: G.blue, padding: '6px 8px', fontSize: 14, fontWeight: 700, fontFamily: FONT_NUM, outline: 'none', textAlign: 'center' }} />
+            <span style={{ fontSize: 13, color: G.blue, fontWeight: 700, fontFamily: FONT_NUM }}>%</span>
             <span style={{ fontSize: 13, color: G.green, fontFamily: FONT_NUM, fontWeight: 600, minWidth: 100, textAlign: 'right' }}>{fmt(Math.abs(t.amount) * t.claimPct / 100)}</span>
           </div>
 
@@ -323,7 +388,7 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
           )}
 
           {/* Compliance toggles */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' }}>
             <button onClick={() => onFlag(t.id, 'accountantOk', !t.accountantOk)}
               style={{
                 background: t.accountantOk ? `rgba(${hexToRgb(G.green)},0.18)` : 'rgba(255,255,255,0.04)',
@@ -342,8 +407,14 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, onDelete }) => {
               }}>
               {t.receiptOk ? '✓ Receipt Saved' : '+ Receipt Saved'}
             </button>
+            {driveUrl && (
+              <a href={driveUrl} target="_blank" rel="noreferrer"
+                style={{ background: `rgba(${hexToRgb(G.blue)},0.12)`, border: `1px solid rgba(${hexToRgb(G.blue)},0.3)`, color: G.blue, borderRadius: 999, padding: '7px 14px', fontSize: 12, fontWeight: 600, fontFamily: FONT, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                Open Drive folder ↗
+              </a>
+            )}
           </div>
-          <div style={{ fontSize: 10, color: G.muted, marginBottom: 4 }}>MTD rules from April 2026 require digital receipts. Photograph yours and save to Drive.</div>
+          <div style={{ fontSize: 10, color: G.muted, marginBottom: 4 }}>MTD rules from April 2026 require digital records. Photograph receipts and save to your Drive folder — HMRC won't ask for them unless they investigate.</div>
 
           {cat && <div style={{ fontSize: 11, color: G.muted, marginTop: 10 }}>{cat.note}</div>}
         </div>
@@ -364,6 +435,7 @@ export default function RDHTaxDashboard() {
   const [aiProgress, setAIProgress]       = useState('');
   const [miles, setMiles]                 = useState(saved.miles || 0);
   const [homeData, setHomeData]           = useState(saved.homeData || { roomPct: 20, councilTax: 0, electricity: 0, gas: 0, broadband: 0, rent: 0 });
+  const [driveUrl, setDriveUrl]           = useState(saved.driveUrl || '');
   const [search, setSearch]               = useState('');
   const [statusFilter, setStatusFilter]   = useState('all');
   const [savedAt, setSavedAt]             = useState(saved.savedAt || null);
@@ -373,16 +445,16 @@ export default function RDHTaxDashboard() {
   // Auto-save to localStorage on any change to persistent fields
   useEffect(() => {
     const now = new Date().toISOString();
-    saveState({ transactions, payslips, miles, homeData, savedAt: now });
+    saveState({ transactions, payslips, miles, homeData, driveUrl, savedAt: now });
     setSavedAt(now);
-  }, [transactions, payslips, miles, homeData]);
+  }, [transactions, payslips, miles, homeData, driveUrl]);
 
   const monzoRef = useRef(), starlingRef = useRef(), rbsRef = useRef(), amexRef = useRef(), payslipRef = useRef();
   const bankRefs = { monzo: monzoRef, starling: starlingRef, rbs: rbsRef, amex: amexRef };
   const BANKS = [{ id:'monzo',label:'Monzo' },{ id:'starling',label:'Starling' },{ id:'rbs',label:'RBS' },{ id:'amex',label:'Amex' }];
 
   // Backup / restore handlers
-  const handleExport = () => exportJSON({ transactions, payslips, miles, homeData, savedAt: new Date().toISOString() });
+  const handleExport = () => exportJSON({ transactions, payslips, miles, homeData, driveUrl, savedAt: new Date().toISOString() });
   const handleImport = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
@@ -393,6 +465,7 @@ export default function RDHTaxDashboard() {
         if (data.payslips) setPayslips(data.payslips);
         if (typeof data.miles === 'number') setMiles(data.miles);
         if (data.homeData) setHomeData(data.homeData);
+        if (typeof data.driveUrl === 'string') setDriveUrl(data.driveUrl);
         alert('Backup restored successfully');
       } catch { alert('Invalid backup file'); }
     };
@@ -400,7 +473,7 @@ export default function RDHTaxDashboard() {
   };
   const handleReset = () => {
     if (confirm('This will delete ALL your data permanently. Make sure you have exported a backup first. Continue?')) {
-      setTransactions([]); setPayslips([]); setMiles(0);
+      setTransactions([]); setPayslips([]); setMiles(0); setDriveUrl('');
       setHomeData({ roomPct: 20, councilTax: 0, electricity: 0, gas: 0, broadband: 0, rent: 0 });
     }
   };
@@ -540,7 +613,7 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
     // Pending first, then by date desc
     if (a.status === 'pending' && b.status !== 'pending') return -1;
     if (b.status === 'pending' && a.status !== 'pending') return 1;
-    return new Date(b.date) - new Date(a.date);
+    return (b.date || '').localeCompare(a.date || '');
   }), [transactions, statusFilter, search]);
 
   const bankCounts = useMemo(() => { const c={}; BANKS.forEach(b => c[b.id]=transactions.filter(t=>t.bank===b.id).length); return c; }, [transactions]);
@@ -784,7 +857,7 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
             {filtered.length > 0 ? (
               <GlassCard style={{ overflow: 'hidden', padding: 0 }}>
                 {filtered.map(t => (
-                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} onFlag={onFlag} />
+                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} onFlag={onFlag} driveUrl={driveUrl} />
                 ))}
               </GlassCard>
             ) : (
@@ -890,6 +963,46 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
                 </div>
               </GlassCard>
             </div>
+
+            {/* Google Drive Receipts Folder */}
+            <GlassCard style={{ padding: '20px 22px', marginTop: 14 }}>
+              <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 14, letterSpacing: '0.02em' }}>RECEIPTS FOLDER (GOOGLE DRIVE)</div>
+              <div style={{ fontSize: 13, color: G.textDim, marginBottom: 14, lineHeight: 1.6 }}>
+                MTD rules from April 2026 require digital records of your business expenses. The simplest way: a Google Drive folder organised by month. HMRC doesn't want the receipts uploaded — you just need them findable if they ever investigate.
+              </div>
+
+              <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: '14px 16px', marginBottom: 14 }}>
+                <div style={{ fontSize: 12, color: G.text, fontWeight: 600, marginBottom: 10 }}>One-time setup (60 seconds)</div>
+                <ol style={{ paddingLeft: 20, margin: 0 }}>
+                  <li style={{ fontSize: 12, color: G.textDim, marginBottom: 6, lineHeight: 1.5 }}>Open <a href="https://drive.google.com" target="_blank" rel="noreferrer" style={{ color: G.blue, textDecoration: 'none' }}>drive.google.com</a></li>
+                  <li style={{ fontSize: 12, color: G.textDim, marginBottom: 6, lineHeight: 1.5 }}>Create a folder called <span style={{ color: G.text, fontWeight: 600 }}>RDH Tax Receipts</span></li>
+                  <li style={{ fontSize: 12, color: G.textDim, marginBottom: 6, lineHeight: 1.5 }}>Inside it, create one folder per tax year (e.g. <span style={{ color: G.text, fontWeight: 600 }}>2026-27</span>)</li>
+                  <li style={{ fontSize: 12, color: G.textDim, marginBottom: 6, lineHeight: 1.5 }}>Right-click the year folder → "Get link" → copy</li>
+                  <li style={{ fontSize: 12, color: G.textDim, lineHeight: 1.5 }}>Paste the URL below — every expense will then have a quick link to open it</li>
+                </ol>
+              </div>
+
+              <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 6, letterSpacing: '0.02em' }}>DRIVE FOLDER URL</div>
+              <input type="url" value={driveUrl} onChange={e => setDriveUrl(e.target.value)} placeholder="https://drive.google.com/drive/folders/..."
+                style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: `1px solid ${driveUrl ? G.blue : G.glassBorder}`, borderRadius: 10, color: G.text, padding: '11px 14px', fontSize: 12, fontFamily: FONT, outline: 'none', boxSizing: 'border-box' }} />
+
+              {driveUrl && (
+                <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <a href={driveUrl} target="_blank" rel="noreferrer"
+                    style={{ background: `rgba(${hexToRgb(G.blue)},0.15)`, color: G.blue, border: `1px solid rgba(${hexToRgb(G.blue)},0.3)`, borderRadius: 10, padding: '10px 18px', fontSize: 13, fontWeight: 600, fontFamily: FONT, textDecoration: 'none' }}>
+                    Open Drive folder ↗
+                  </a>
+                  <button onClick={() => setDriveUrl('')}
+                    style={{ background: 'transparent', color: G.textDim, border: 'none', fontSize: 12, cursor: 'pointer', fontFamily: FONT }}>
+                    Clear
+                  </button>
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, color: G.muted, marginTop: 14, lineHeight: 1.6 }}>
+                Tip: drop in receipts AND your bank statements (Monzo, Starling, RBS, Amex CSVs/PDFs) every month so everything HMRC could ever ask for lives in one place.
+              </div>
+            </GlassCard>
 
             {/* Data Management */}
             <GlassCard style={{ padding: '20px 22px', marginTop: 14 }}>
