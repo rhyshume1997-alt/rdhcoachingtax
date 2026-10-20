@@ -159,11 +159,86 @@ const toMonthKey = d => {
   return m ? `${m[1]}-${m[2]}` : 'Unknown';
 };
 
+/* ─── UK TAX YEAR & MTD ──────────────────────────────────────────────── */
+// UK tax year runs 6 April → 5 April. Dates are YYYY-MM-DD strings, so string compare works.
+const taxYearOf = d => {
+  const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  return `${m[2]}-${m[3]}` >= '04-06' ? y : y - 1;
+};
+const taxYearLabel = y => `${y}/${String(y + 1).slice(2)}`;
+const iso = (y, m, d) => `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+
+// MTD ITSA quarterly periods. Standard = tax-year quarters; calendar = elected calendar quarters.
+// Updates are cumulative (year to date) and due on the 7th of the month after the period ends.
+const mtdQuarters = (y, calendar) => calendar ? [
+  { q: 'Q1', start: iso(y,4,1),   end: iso(y,6,30),   due: iso(y,8,7) },
+  { q: 'Q2', start: iso(y,7,1),   end: iso(y,9,30),   due: iso(y,11,7) },
+  { q: 'Q3', start: iso(y,10,1),  end: iso(y,12,31),  due: iso(y+1,2,7) },
+  { q: 'Q4', start: iso(y+1,1,1), end: iso(y+1,3,31), due: iso(y+1,5,7) },
+] : [
+  { q: 'Q1', start: iso(y,4,6),   end: iso(y,7,5),    due: iso(y,8,7) },
+  { q: 'Q2', start: iso(y,7,6),   end: iso(y,10,5),   due: iso(y,11,7) },
+  { q: 'Q3', start: iso(y,10,6),  end: iso(y+1,1,5),  due: iso(y+1,2,7) },
+  { q: 'Q4', start: iso(y+1,1,6), end: iso(y+1,4,5),  due: iso(y+1,5,7) },
+];
+const prettyDate = d => { const [y, m, dd] = d.split('-'); return `${parseInt(dd,10)} ${MONTHS[parseInt(m,10)-1]} ${y}`; };
+
+// Qualifying income thresholds (gross self-employment + property income) for MTD ITSA
+const MTD_THRESHOLDS = [
+  { from: 2026, amount: 50000 },
+  { from: 2027, amount: 30000 },
+  { from: 2028, amount: 20000 },
+];
+
+// HMRC self-employment expense categories (SA103F boxes / MTD API fields)
+const HMRC_CATS = [
+  { id: 'costOfGoods',                label: 'Cost of goods bought for resale' },
+  { id: 'staffCosts',                 label: 'Wages, salaries and other staff costs' },
+  { id: 'travelCosts',                label: 'Car, van and travel expenses' },
+  { id: 'premisesRunningCosts',       label: 'Rent, rates, power and insurance costs' },
+  { id: 'maintenanceCosts',           label: 'Repairs and maintenance' },
+  { id: 'adminCosts',                 label: 'Phone, stationery and other office costs' },
+  { id: 'advertisingCosts',           label: 'Advertising and business entertainment' },
+  { id: 'interestOnBankOtherLoans',   label: 'Interest on bank and other loans' },
+  { id: 'financeCharges',             label: 'Bank, credit card and other financial charges' },
+  { id: 'irrecoverableDebts',         label: 'Irrecoverable debts written off' },
+  { id: 'professionalFees',           label: 'Accountancy, legal and other professional fees' },
+  { id: 'otherExpenses',              label: 'Other allowable business expenses' },
+];
+const HMRC_MAP = {
+  software: 'adminCosts', phone: 'adminCosts', internet: 'adminCosts', stationery: 'adminCosts',
+  marketing: 'advertisingCosts', website: 'advertisingCosts',
+  paymentfees: 'financeCharges', bankfees: 'financeCharges',
+  homeoffice: 'premisesRunningCosts',
+  car: 'travelCosts', travel: 'travelCosts', subsistence: 'travelCosts', accommodation: 'travelCosts', parking: 'travelCosts',
+  profees: 'professionalFees',
+  equipment: 'otherExpenses', cpd: 'otherExpenses', insurance: 'otherExpenses', memberships: 'otherExpenses', other: 'otherExpenses',
+};
+const hmrcCatOf = subcat => HMRC_MAP[subcat] || 'otherExpenses';
+const hmrcLabel = id => HMRC_CATS.find(c => c.id === id)?.label || id;
+
+/* ─── CSV EXPORT ─────────────────────────────────────────────────────── */
+const csvCell = v => {
+  const s = v === null || v === undefined ? '' : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const money = n => (Math.round(n * 100) / 100).toFixed(2);
+const downloadCSV = (rows, filename) => {
+  // BOM so Excel opens the £ sign correctly
+  const blob = new Blob(['﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+};
+
 const parseCSV = (text, bank) => {
   const lines = text.trim().split('\n'); if (lines.length < 2) return [];
   const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim().toLowerCase());
   const get = (row, keys) => { for (const k of keys) if (row[k] !== undefined && row[k] !== '') return row[k]; return ''; };
-  const toAmt = s => { if (!s) return 0; const n = parseFloat(String(s).replace(/[£,$\s]/g,'')); return isNaN(n) ? 0 : n; };
+  const toAmt = s => { if (!s) return 0; const str = String(s); const n = parseFloat(str.replace(/[£,$\s()]/g,'')); return isNaN(n) ? 0 : /^\(.*\)$/.test(str.trim()) ? -Math.abs(n) : n; };
   return lines.slice(1).filter(l => l.trim()).map((line, idx) => {
     const vals = []; let cur = '', inQ = false;
     for (const ch of line) { if (ch === '"') inQ = !inQ; else if (ch === ',' && !inQ) { vals.push(cur); cur = ''; } else cur += ch; }
@@ -174,6 +249,12 @@ const parseCSV = (text, bank) => {
     else if (bank === 'starling') { rawDate=get(row,['date']); desc=get(row,['counter party','reference','description']); amount=toAmt(get(row,['amount (gbp)','amount'])); }
     else if (bank === 'rbs') { rawDate=get(row,['date','transaction date']); desc=get(row,['description','merchant name','reference']); const cr=toAmt(get(row,['credit amount','credit'])),db=toAmt(get(row,['debit amount','debit'])); amount=cr>0?cr:db>0?-db:toAmt(get(row,['amount'])); }
     else if (bank === 'amex') { rawDate=get(row,['date','transaction date']); desc=get(row,['description','merchant']); amount=-toAmt(get(row,['amount'])); }
+    else { // any other bank: guess the columns from common header names
+      rawDate=get(row,['date','transaction date','posted date','posting date','value date','completed date','started date']);
+      desc=get(row,['description','name','merchant','merchant name','counter party','counterparty','payee','details','narrative','transaction description','reference','memo']);
+      const cr=Math.abs(toAmt(get(row,['paid in','money in','credit','credit amount','in']))), db=Math.abs(toAmt(get(row,['paid out','money out','debit','debit amount','out'])));
+      amount=cr>0?cr:db>0?-Math.abs(db):toAmt(get(row,['amount','amount (gbp)','value','transaction amount']));
+    }
     if (!desc || amount === 0) return null;
     const date = parseDate(rawDate) || rawDate; // fall back to raw if parse fails
     return { id:`${bank}-${idx}-${Date.now()}-${Math.random()}`, date, description:desc, amount, bank, status:'pending', subcat:null, claimPct:100, claimable:0, note:'', accountantOk:false, receiptOk:false };
@@ -275,7 +356,7 @@ const HomeOfficeCalc = ({ homeData, setHomeData }) => {
 };
 
 /* ─── TRANSACTION CARD ───────────────────────────────────────────────── */
-const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, driveUrl, onDelete }) => {
+const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, driveUrl, onDelete, selected, onSelect }) => {
   const [open, setOpen] = useState(false);
   const [showNote, setShowNote] = useState(!!t.note);
   const cat = EXPENSE_CATS.find(c => c.id === t.subcat);
@@ -291,6 +372,10 @@ const TCard = ({ t, onStatus, onSubcat, onPct, onNote, onFlag, driveUrl, onDelet
     }}>
       {/* Main row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', flexWrap: 'wrap' }}>
+        {onSelect && (
+          <input type="checkbox" checked={!!selected} onChange={e => onSelect(t.id, e.target.checked)}
+            style={{ width: 18, height: 18, accentColor: G.blue, cursor: 'pointer', flexShrink: 0 }} />
+        )}
         <div style={{ flex: 1, minWidth: 200 }}>
           <div style={{ fontSize: 14, color: G.text, fontWeight: 500, lineHeight: 1.3 }}>{t.description}</div>
           <div style={{ fontSize: 11, color: G.muted, marginTop: 4 }}>
@@ -441,20 +526,23 @@ export default function RDHTaxDashboard() {
   const [savedAt, setSavedAt]             = useState(saved.savedAt || null);
   const [payslipModal, setPayslipModal]   = useState(false);
   const [editingSlip, setEditingSlip]     = useState({ month: '', grossPay: '', netPay: '', incomeTaxPaid: '', niPaid: '' });
+  const [taxYear, setTaxYear]             = useState(taxYearOf(new Date().toISOString().slice(0,10)));
+  const [calendarQuarters, setCalendarQuarters] = useState(saved.calendarQuarters || false);
+  const [selected, setSelected]           = useState(() => new Set());
 
   // Auto-save to localStorage on any change to persistent fields
   useEffect(() => {
     const now = new Date().toISOString();
-    saveState({ transactions, payslips, miles, homeData, driveUrl, savedAt: now });
+    saveState({ transactions, payslips, miles, homeData, driveUrl, calendarQuarters, savedAt: now });
     setSavedAt(now);
-  }, [transactions, payslips, miles, homeData, driveUrl]);
+  }, [transactions, payslips, miles, homeData, driveUrl, calendarQuarters]);
 
-  const monzoRef = useRef(), starlingRef = useRef(), rbsRef = useRef(), amexRef = useRef(), payslipRef = useRef();
-  const bankRefs = { monzo: monzoRef, starling: starlingRef, rbs: rbsRef, amex: amexRef };
-  const BANKS = [{ id:'monzo',label:'Monzo' },{ id:'starling',label:'Starling' },{ id:'rbs',label:'RBS' },{ id:'amex',label:'Amex' }];
+  const monzoRef = useRef(), starlingRef = useRef(), rbsRef = useRef(), amexRef = useRef(), otherRef = useRef(), payslipRef = useRef();
+  const bankRefs = { monzo: monzoRef, starling: starlingRef, rbs: rbsRef, amex: amexRef, other: otherRef };
+  const BANKS = [{ id:'monzo',label:'Monzo' },{ id:'starling',label:'Starling' },{ id:'rbs',label:'RBS' },{ id:'amex',label:'Amex' },{ id:'other',label:'Other CSV' }];
 
   // Backup / restore handlers
-  const handleExport = () => exportJSON({ transactions, payslips, miles, homeData, driveUrl, savedAt: new Date().toISOString() });
+  const handleExport = () => exportJSON({ transactions, payslips, miles, homeData, driveUrl, calendarQuarters, savedAt: new Date().toISOString() });
   const handleImport = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
@@ -480,7 +568,7 @@ export default function RDHTaxDashboard() {
   const importRef = useRef();
 
   const handleUpload = useCallback((bank) => (e) => {
-    const file = e.target.files[0]; if (!file) return;
+    Array.from(e.target.files).forEach(file => {
     const reader = new FileReader();
     reader.onload = ev => {
       const newOnes = parseCSV(ev.target.result, bank);
@@ -492,7 +580,9 @@ export default function RDHTaxDashboard() {
         return [...prev, ...fresh];
       });
     };
-    reader.readAsText(file); e.target.value = '';
+    reader.readAsText(file);
+    });
+    e.target.value = '';
   }, []);
 
   const handlePayslip = useCallback(async (e) => {
@@ -618,7 +708,124 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
 
   const bankCounts = useMemo(() => { const c={}; BANKS.forEach(b => c[b.id]=transactions.filter(t=>t.bank===b.id).length); return c; }, [transactions]);
 
-  const tabs = ['Dashboard','Transactions','Deductions','Monthly'];
+  // Bulk select
+  const onSelect = useCallback((id, on) => {
+    setSelected(prev => { const n = new Set(prev); on ? n.add(id) : n.delete(id); return n; });
+  }, []);
+  const bulkStatus = (status) => {
+    selected.forEach(id => onStatus(id, status));
+    setSelected(new Set());
+  };
+  const bulkSubcat = (subcat) => {
+    const cat = EXPENSE_CATS.find(c => c.id === subcat);
+    selected.forEach(id => { onStatus(id, 'expense'); onSubcat(id, subcat, cat?.pct ? cat.defaultPct : 100); });
+    setSelected(new Set());
+  };
+
+  // Tax years that have data, plus the current one
+  const taxYears = useMemo(() => {
+    const ys = new Set([taxYearOf(new Date().toISOString().slice(0,10))]);
+    transactions.forEach(t => { const y = taxYearOf(t.date); if (y) ys.add(y); });
+    return [...ys].sort((a,b) => b - a);
+  }, [transactions]);
+
+  // MTD figures for the selected tax year: per quarter and cumulative year-to-date
+  const mtd = useMemo(() => {
+    const quarters = mtdQuarters(taxYear, calendarQuarters);
+    const yearStart = quarters[0].start, yearEnd = quarters[3].end;
+    const inYear = transactions.filter(t => t.date >= yearStart && t.date <= yearEnd);
+    const blank = () => { const o = { turnover: 0, expenses: 0, count: 0 }; HMRC_CATS.forEach(c => { o[c.id] = 0; }); return o; };
+    const periods = quarters.map(q => {
+      const p = { ...q, ...blank() };
+      inYear.filter(t => t.date >= q.start && t.date <= q.end).forEach(t => {
+        if (t.status === 'income') { p.turnover += t.amount; p.count++; }
+        if (t.status === 'expense') { p[hmrcCatOf(t.subcat)] += t.claimable; p.expenses += t.claimable; p.count++; }
+      });
+      return p;
+    });
+    let run = blank();
+    const cumulative = periods.map(p => {
+      const c = { ...p };
+      Object.keys(blank()).forEach(k => { c[k] = run[k] + p[k]; });
+      run = c;
+      return c;
+    });
+    const pendingInYear = inYear.filter(t => t.status === 'pending').length;
+    const uncategorised = inYear.filter(t => t.status === 'expense' && !t.subcat).length;
+    return { quarters: periods, cumulative, pendingInYear, uncategorised, inYear };
+  }, [transactions, taxYear, calendarQuarters]);
+
+  // Export: every claimable expense in the tax year, then totals to deduct
+  const exportExpensesCSV = () => {
+    const y = taxYear, label = taxYearLabel(y);
+    const expenses = mtd.inYear.filter(t => t.status === 'expense').sort((a,b) => a.date.localeCompare(b.date));
+    const income = mtd.inYear.filter(t => t.status === 'income');
+    const rows = [
+      [`RDH Coaching tax expenses ${label}`, `6 Apr ${y} to 5 Apr ${y + 1}`],
+      [],
+      ['Date','Description','Bank','Category','HMRC category','Amount paid','Business %','Claimable','Receipt','Note'],
+      ...expenses.map(t => {
+        const cat = EXPENSE_CATS.find(c => c.id === t.subcat);
+        return [t.date, t.description, t.bank.toUpperCase(), cat?.label || 'Uncategorised', hmrcLabel(hmrcCatOf(t.subcat)),
+          money(Math.abs(t.amount)), t.claimPct, money(t.claimable), t.receiptOk ? 'Yes' : 'No', t.note || ''];
+      }),
+      [],
+      ['TOTALS BY CATEGORY'],
+      ['Category','Transactions','Claimable'],
+    ];
+    const byCat = {};
+    expenses.forEach(t => { const k = t.subcat || 'uncategorised'; byCat[k] = byCat[k] || { n: 0, v: 0 }; byCat[k].n++; byCat[k].v += t.claimable; });
+    Object.entries(byCat).sort((a,b) => b[1].v - a[1].v).forEach(([k, v]) => rows.push([EXPENSE_CATS.find(c => c.id === k)?.label || 'Uncategorised', v.n, money(v.v)]));
+    if (mileageClaimable > 0) rows.push([`Mileage (${miles} miles)`, '', money(mileageClaimable)]);
+    if (homeClaimable > 0) rows.push([`Home office (${homeData.roomPct}% of bills)`, '', money(homeClaimable)]);
+    const txTotal = expenses.reduce((s,t) => s + t.claimable, 0);
+    const totalExp = txTotal + mileageClaimable + homeClaimable;
+    const totalInc = income.reduce((s,t) => s + t.amount, 0);
+    rows.push(
+      [],
+      ['TOTALS BY HMRC CATEGORY (Self Assessment / MTD)'],
+      ['HMRC category','','Claimable'],
+    );
+    const byHmrc = {};
+    expenses.forEach(t => { const k = hmrcCatOf(t.subcat); byHmrc[k] = (byHmrc[k] || 0) + t.claimable; });
+    if (mileageClaimable > 0) byHmrc.travelCosts = (byHmrc.travelCosts || 0) + mileageClaimable;
+    if (homeClaimable > 0) byHmrc.premisesRunningCosts = (byHmrc.premisesRunningCosts || 0) + homeClaimable;
+    HMRC_CATS.filter(c => byHmrc[c.id]).forEach(c => rows.push([c.label, '', money(byHmrc[c.id])]));
+    rows.push(
+      [],
+      ['SUMMARY'],
+      ['Total business income (turnover)', '', money(totalInc)],
+      ['Total allowable expenses to deduct', '', money(totalExp)],
+      ['Net profit', '', money(totalInc - totalExp)],
+    );
+    if (mtd.pendingInYear > 0) rows.push([], [`WARNING: ${mtd.pendingInYear} transactions in this tax year are still not categorised`]);
+    downloadCSV(rows, `rdh-tax-expenses-${label.replace('/','-')}.csv`);
+  };
+
+  // Export: MTD quarterly update figures (cumulative, as HMRC expects)
+  const exportMTDCSV = () => {
+    const label = taxYearLabel(taxYear);
+    const rows = [
+      [`RDH Coaching MTD quarterly figures ${label}`, calendarQuarters ? 'Calendar quarters' : 'Standard quarters'],
+      ['Figures are cumulative from the start of the tax year. Mileage and home office are annual and go in the final declaration.'],
+      [],
+      ['Line', ...mtd.cumulative.map(p => `${p.q} to ${p.end}`)],
+      ['Period start', ...mtd.cumulative.map(() => mtd.cumulative[0].start)],
+      ['Period end', ...mtd.cumulative.map(p => p.end)],
+      ['Submit by', ...mtd.cumulative.map(p => p.due)],
+      ['Turnover', ...mtd.cumulative.map(p => money(p.turnover))],
+      ...HMRC_CATS.map(c => [c.label, ...mtd.cumulative.map(p => money(p[c.id]))]),
+      ['Total expenses', ...mtd.cumulative.map(p => money(p.expenses))],
+      ['Net profit', ...mtd.cumulative.map(p => money(p.turnover - p.expenses))],
+      [],
+      ['THIS QUARTER ONLY'],
+      ['Turnover', ...mtd.quarters.map(p => money(p.turnover))],
+      ['Total expenses', ...mtd.quarters.map(p => money(p.expenses))],
+    ];
+    downloadCSV(rows, `rdh-mtd-quarters-${label.replace('/','-')}.csv`);
+  };
+
+  const tabs = ['Dashboard','Transactions','Deductions','MTD','Monthly'];
 
   return (
     <div style={{ minHeight: '100vh', background: G.bg, fontFamily: FONT, color: G.text, fontSize: 14 }}>
@@ -644,7 +851,7 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
           {/* Payslip file input removed — using manual modal instead */}
           {BANKS.map(b => (
             <div key={b.id}>
-              <input ref={bankRefs[b.id]} type="file" accept=".csv" onChange={handleUpload(b.id)} style={{ display: 'none' }} />
+              <input ref={bankRefs[b.id]} type="file" accept=".csv" multiple onChange={handleUpload(b.id)} style={{ display: 'none' }} />
               <button onClick={() => bankRefs[b.id].current.click()}
                 style={{ background: bankCounts[b.id] > 0 ? `rgba(${hexToRgb(G.blue)},0.15)` : G.glass, border: `1px solid ${bankCounts[b.id] > 0 ? G.blue : G.glassBorder}`, borderRadius: 9, color: bankCounts[b.id] > 0 ? G.blue : G.textDim, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT, transition: 'all 0.15s' }}>
                 {b.label}{bankCounts[b.id] > 0 ? ` · ${bankCounts[b.id]}` : ''}
@@ -854,10 +1061,35 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
               )}
             </div>
 
+            {/* Bulk actions */}
+            {filtered.length > 0 && (
+              <GlassCard style={{ padding: '10px 16px', marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', borderColor: selected.size > 0 ? G.blue : G.glassBorder }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: G.textDim, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={filtered.length > 0 && filtered.every(t => selected.has(t.id))}
+                    onChange={e => setSelected(e.target.checked ? new Set(filtered.map(t => t.id)) : new Set())}
+                    style={{ width: 18, height: 18, accentColor: G.blue, cursor: 'pointer' }} />
+                  {selected.size > 0 ? `${selected.size} selected` : `Select all ${filtered.length} shown`}
+                </label>
+                {selected.size > 0 && (<>
+                  <button onClick={() => bulkStatus('income')}   style={pill(G.green)}>Mark income</button>
+                  <button onClick={() => bulkStatus('expense')}  style={pill(G.blue)}>Mark expense</button>
+                  <button onClick={() => bulkStatus('personal')} style={pill(G.muted)}>Mark personal</button>
+                  <select value="" onChange={e => e.target.value && bulkSubcat(e.target.value)}
+                    style={{ background: G.glass, color: G.text, border: `1px solid ${G.glassBorderHi}`, borderRadius: 999, padding: '6px 12px', fontSize: 12, fontFamily: FONT }}>
+                    <option value="">Expense as category…</option>
+                    {EXPENSE_CATS.map(c => <option key={c.id} value={c.id} style={{ color: '#000' }}>{c.label}</option>)}
+                  </select>
+                  <button onClick={() => setSelected(new Set())} style={{ ...pill(G.muted), opacity: 0.6 }}>Clear</button>
+                </>)}
+                <button onClick={exportExpensesCSV} style={{ ...{ background: G.glass, color: G.text, border: `1px solid ${G.glassBorderHi}`, borderRadius: 999, padding: '7px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }, marginLeft: 'auto' }}>Export tax expenses CSV ({taxYearLabel(taxYear)})</button>
+              </GlassCard>
+            )}
+
             {filtered.length > 0 ? (
               <GlassCard style={{ overflow: 'hidden', padding: 0 }}>
                 {filtered.map(t => (
-                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} onFlag={onFlag} driveUrl={driveUrl} />
+                  <TCard key={t.id} t={t} onStatus={onStatus} onSubcat={onSubcat} onPct={onPct} onNote={onNote} onFlag={onFlag} driveUrl={driveUrl}
+                    selected={selected.has(t.id)} onSelect={onSelect} />
                 ))}
               </GlassCard>
             ) : (
@@ -1032,6 +1264,109 @@ ${JSON.stringify(batch.map(({id,description,amount,bank})=>({id,description,amou
             </GlassCard>
           </div>
         )}
+
+        {/* ══ MTD ══ */}
+        {tab === 'MTD' && (() => {
+          const today = new Date().toISOString().slice(0,10);
+          const threshold = MTD_THRESHOLDS.filter(t => t.from <= taxYear).slice(-1)[0];
+          const yearTurnover = mtd.cumulative[3].turnover;
+          const annualExtras = mileageClaimable + homeClaimable;
+          const final = mtd.cumulative[3];
+          const cell = { textAlign: 'right', fontSize: 13, fontFamily: FONT_NUM };
+          const cols = '1.6fr repeat(4, 1fr)';
+          return (
+            <div>
+              {/* Controls */}
+              <GlassCard style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: G.muted, fontWeight: 600 }}>TAX YEAR</span>
+                <select value={taxYear} onChange={e => setTaxYear(parseInt(e.target.value, 10))}
+                  style={{ background: G.glass, color: G.text, border: `1px solid ${G.glassBorderHi}`, borderRadius: 999, padding: '7px 12px', fontSize: 13, fontFamily: FONT }}>
+                  {taxYears.map(y => <option key={y} value={y} style={{ color: '#000' }}>{taxYearLabel(y)}</option>)}
+                </select>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: G.textDim, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={calendarQuarters} onChange={e => setCalendarQuarters(e.target.checked)} style={{ accentColor: G.blue }} />
+                  Calendar quarters (if you elected them)
+                </label>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button onClick={exportMTDCSV} style={{ background: G.glass, color: G.text, border: `1px solid ${G.glassBorderHi}`, borderRadius: 10, padding: '9px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}>Export MTD quarters CSV</button>
+                  <button onClick={exportExpensesCSV} style={{ ...{ background: G.glass, color: G.text, border: `1px solid ${G.glassBorderHi}`, borderRadius: 10, padding: '9px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }, background: `linear-gradient(135deg, ${G.blue}, ${G.purple})`, border: 'none', color: '#fff' }}>Export tax expenses CSV</button>
+                </div>
+              </GlassCard>
+
+              {(mtd.pendingInYear > 0 || mtd.uncategorised > 0) && (
+                <GlassCard style={{ padding: '14px 18px', marginBottom: 14, borderColor: `rgba(${hexToRgb(G.gold)},0.4)` }}>
+                  <div style={{ fontSize: 13, color: G.gold }}>
+                    {mtd.pendingInYear > 0 && <>{mtd.pendingInYear} transactions in {taxYearLabel(taxYear)} still need sorting. </>}
+                    {mtd.uncategorised > 0 && <>{mtd.uncategorised} expenses have no category, so they count as "Other allowable business expenses".</>}
+                  </div>
+                </GlassCard>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 12, marginBottom: 14 }}>
+                <StatTile label={`Turnover ${taxYearLabel(taxYear)}`} value={fmt(final.turnover)} color={G.green} />
+                <StatTile label="Expenses (from transactions)" value={fmt(final.expenses)} color={G.blue} sub={annualExtras > 0 ? `+ ${fmt(annualExtras)} mileage & home office at year end` : undefined} />
+                <StatTile label="Net profit (year to date)" value={fmt(final.turnover - final.expenses - annualExtras)} color={G.text} />
+                <StatTile label="MTD threshold" value={fmt(threshold.amount)} color={yearTurnover > threshold.amount ? G.red : G.gold}
+                  sub={yearTurnover > threshold.amount ? 'Your turnover is over this' : `Your turnover is under this so far`} />
+              </div>
+
+              {/* Deadlines */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 12, marginBottom: 14 }}>
+                {mtd.quarters.map(p => {
+                  const state = today > p.due ? 'Deadline passed' : today > p.end ? 'Due now' : today >= p.start ? 'In progress' : 'Upcoming';
+                  const color = state === 'Due now' ? G.gold : state === 'Deadline passed' ? G.muted : state === 'In progress' ? G.blue : G.textDim;
+                  return (
+                    <GlassCard key={p.q} style={{ padding: '16px 18px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 15, fontWeight: 700 }}>{p.q}</span>
+                        <span style={pill(color)}>{state}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: G.textDim, marginTop: 8 }}>{prettyDate(p.start)} to {prettyDate(p.end)}</div>
+                      <div style={{ fontSize: 12, color: G.text, marginTop: 4 }}>Submit by <b>{prettyDate(p.due)}</b></div>
+                      <div style={{ fontSize: 11, color: G.muted, marginTop: 6 }}>{p.count} categorised transactions</div>
+                    </GlassCard>
+                  );
+                })}
+              </div>
+
+              {/* Cumulative figures table */}
+              <GlassCard style={{ padding: 0, overflowX: 'auto', marginBottom: 14 }}>
+                <div style={{ minWidth: 640 }}>
+                  <div style={{ padding: '14px 20px', fontSize: 11, color: G.muted, fontWeight: 600, letterSpacing: '0.02em', borderBottom: `1px solid ${G.glassBorder}` }}>
+                    QUARTERLY UPDATE FIGURES (CUMULATIVE YEAR TO DATE, AS HMRC ASKS FOR THEM)
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 12, padding: '10px 20px', borderBottom: `1px solid ${G.glassBorder}` }}>
+                    <div style={{ fontSize: 11, color: G.muted, fontWeight: 600 }}>LINE</div>
+                    {mtd.cumulative.map(p => <div key={p.q} style={{ ...cell, fontSize: 11, color: G.muted, fontWeight: 600 }}>{p.q} · to {prettyDate(p.end)}</div>)}
+                  </div>
+                  {[
+                    { id: 'turnover', label: 'Turnover', color: G.green, bold: true },
+                    ...HMRC_CATS.filter(c => final[c.id] > 0).map(c => ({ id: c.id, label: c.label, color: G.textDim })),
+                    { id: 'expenses', label: 'Total expenses', color: G.blue, bold: true },
+                  ].map(r => (
+                    <div key={r.id} style={{ display: 'grid', gridTemplateColumns: cols, gap: 12, padding: '10px 20px', borderBottom: `1px solid ${G.glassBorder}` }}>
+                      <div style={{ fontSize: 13, color: r.bold ? G.text : G.textDim, fontWeight: r.bold ? 600 : 400 }}>{r.label}</div>
+                      {mtd.cumulative.map(p => <div key={p.q} style={{ ...cell, color: r.color, fontWeight: r.bold ? 600 : 400 }}>{fmt(p[r.id])}</div>)}
+                    </div>
+                  ))}
+                  <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 12, padding: '12px 20px', background: 'rgba(255,255,255,0.05)' }}>
+                    <div style={{ fontSize: 13, color: G.text, fontWeight: 700 }}>Net profit</div>
+                    {mtd.cumulative.map(p => <div key={p.q} style={{ ...cell, color: G.text, fontWeight: 700 }}>{fmt(p.turnover - p.expenses)}</div>)}
+                  </div>
+                </div>
+              </GlassCard>
+
+              <GlassCard style={{ padding: '18px 22px' }}>
+                <div style={{ fontSize: 11, color: G.muted, fontWeight: 600, marginBottom: 10, letterSpacing: '0.02em' }}>HOW MTD WORKS</div>
+                <div style={{ fontSize: 12, color: G.textDim, lineHeight: 1.7 }}>
+                  Making Tax Digital for Income Tax applies when your gross self-employment and property income is over £50,000 (from 6 April 2026), £30,000 (from April 2027) and £20,000 (from April 2028). HMRC decides using the turnover on your earlier tax return, not profit. Your PAYE salary doesn't count.<br />
+                  If you're in, you send four quarterly updates a year from MTD-compatible software, then a final declaration by <b>31 January {taxYear + 2}</b>. That's also when any tax owed for {taxYearLabel(taxYear)} is due. The figures above are what goes into each update. Mileage and home office are annual adjustments, so they're only added in the final declaration and the expenses export.<br />
+                  This dashboard can't submit to HMRC itself. Use the CSV exports with bridging software or hand them to your accountant. Check the details with them, as HMRC rules can change.
+                </div>
+              </GlassCard>
+            </div>
+          );
+        })()}
 
         {/* ══ MONTHLY ══ */}
         {tab === 'Monthly' && (() => {
